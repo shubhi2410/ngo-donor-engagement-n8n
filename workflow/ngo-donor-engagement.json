@@ -1,0 +1,522 @@
+{
+  "name": "NGO Donor Engagement",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "monthsInterval": 3,
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -224,
+        -32
+      ],
+      "id": "38756552-0dde-4048-bde5-90942e582420",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "authentication": "airtableOAuth2Api",
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "apprTSWh4DiaaJFad",
+          "mode": "list",
+          "cachedResultName": "NGO Donor Engagement",
+          "cachedResultUrl": "https://airtable.com/apprTSWh4DiaaJFad"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl8CaSrdSlAZnAHS",
+          "mode": "list",
+          "cachedResultName": "Donors",
+          "cachedResultUrl": "https://airtable.com/apprTSWh4DiaaJFad/tbl8CaSrdSlAZnAHS"
+        },
+        "filterByFormula": "AND({Status} = 'Active', OR({Last Contacted} = BLANK(), IS_BEFORE({Last Contacted}, DATEADD(TODAY(), -25, 'days'))))",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        -48,
+        -32
+      ],
+      "id": "5c6f6052-d20b-4ca2-968b-4aff20a82b0d",
+      "name": "Get Active Donors",
+      "credentials": {
+        "airtableOAuth2Api": {
+          "id": "jspurTi5HzGCg2Um",
+          "name": "Airtable account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        144,
+        -32
+      ],
+      "id": "9455ba18-70f8-4655-8522-4dad14d81467",
+      "name": "Loop Over Donors"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ============================================================================\n// n8n Code node: \"Build Prompt\"\n// Mode: Run Once for Each Item      Language: JavaScript\n//\n// Input : one Airtable donor record (arrives from the Loop Over Items node)\n// Output: record_id, name, email, impact_area, allowed_numbers, groq_request\n//         (groq_request is the JSON body sent to the Groq API in the next node)\n//\n// Privacy choice: only the FIRST NAME, impact area, giving-since year, last-gift\n// month and the personal note are sent to Groq. Email address, surname and\n// the amount given are NOT sent.\n//\n// The system prompt below is identical to prompts/system-prompt.txt.\n// The update lines below are identical to prompts/impact-updates.json.\n// ============================================================================\n\nconst SYSTEM_PROMPT = \"You write short donor update emails for a small non-profit called Hope Foundation.\\n\\nRules:\\n- Write 90 to 130 words in the body. No more.\\n- Begin the body with \\\"Dear <first name>,\\\" using only the first name you are given.\\n- Open with something specific to this donor: their impact area, the year they began giving, or the personal note you are given. If you mention how long they have given, say \\\"since <year>\\\" using the year provided. Do not calculate a number of years.\\n- Share exactly one update, taken only from the line labelled \\\"Update for this donor's impact area\\\". Never invent statistics, amounts, project names, dates or events.\\n- Never state or guess how much the donor has given. Never use a currency symbol. You may call them a long-time or recent supporter.\\n- Thank them plainly. Do not use the phrases \\\"valued partner\\\" or \\\"we are humbled\\\". No exclamation marks.\\n- Close with one light, low-pressure line. Do not ask for money.\\n- Plain text only. No markdown and no bullet points.\\n- End the body with the sign-off \\\"Priya Nair\\\" on one line and \\\"Hope Foundation\\\" on the next line.\\n\\nReturn ONLY a JSON object, with no text before or after it, in exactly this shape:\\n{\\\"subject\\\": \\\"...\\\", \\\"body\\\": \\\"...\\\"}\\n\\nThe subject must be under 55 characters.\";\n\nconst IMPACT_UPDATES = {\n  \"Education\": \"The after-school programme reopened in three villages and 240 children are now enrolled.\",\n  \"Clean Water\": \"Two new borehole wells were completed and tested this month.\",\n  \"Healthcare\": \"The mobile clinic completed its first full quarter of monthly visits.\",\n  \"Food Security\": \"The community kitchen now serves 180 meals a day, up from 120.\",\n  \"Women's Shelter\": \"The shelter added four beds and a full-time counsellor.\"\n};\n\n// Used when a donor's impact area has no update line. Contains no numbers on purpose.\nconst FALLBACK_UPDATE = \"Hope Foundation continues its work across all of its programme areas this month.\";\n\nconst rec = $json;\n// The Airtable node can return fields at the top level or inside \"fields\". Handle both.\nconst f = rec.fields ? rec.fields : rec;\n\nconst fullName = String(f['Name'] || '').trim();\nconst firstName = fullName.split(/\\s+/)[0] || 'friend';\nconst email = String(f['Email'] || '').trim();\nconst area = String(f['Impact Area'] || '').trim();\nconst donorSince = String(f['Donor Since'] || '');\nconst lastGift = String(f['Last Gift Date'] || '');\nconst notes = String(f['Notes'] || '').trim();\n\nconst givingSinceYear = donorSince.slice(0, 4) || 'unknown';\nconst lastGiftYearMonth = lastGift.slice(0, 7) || 'unknown';\nconst updateLine = IMPACT_UPDATES[area] || FALLBACK_UPDATE;\n\nconst userPrompt =\n  'First name: ' + firstName + '\\n' +\n  'Impact area: ' + (area || 'not specified') + '\\n' +\n  'Giving since: ' + givingSinceYear + '\\n' +\n  'Last gift: ' + lastGiftYearMonth + '\\n' +\n  'Personal note: ' + (notes || 'none') + '\\n\\n' +\n  \"Update for this donor's impact area:\\n\" + updateLine + '\\n\\n' +\n  'Write the email now. Return only the JSON object.';\n\n// Numbers the email is allowed to contain: those in the update line and in the donor's own data.\n// The Parse Email node blocks any email containing a number that is not in this list.\nfunction numbersIn(text) {\n  const found = String(text).match(/\\d[\\d,]*(?:\\.\\d+)?/g) || [];\n  return found.map(x => String(parseFloat(x.replace(/,/g, ''))));\n}\nconst allowedNumbers = Array.from(new Set(\n  numbersIn(updateLine).concat(numbersIn(donorSince), numbersIn(lastGift), numbersIn(notes))\n));\n\nreturn {\n  json: {\n    record_id: rec.id,\n    name: fullName,\n    email: email,\n    impact_area: area,\n    allowed_numbers: allowedNumbers,\n    groq_request: {\n      model: 'openai/gpt-oss-120b',\n      temperature: 0.6,\n      reasoning_effort: 'low',\n      max_completion_tokens: 2000,\n      response_format: { type: 'json_object' },\n      messages: [\n        { role: 'system', content: SYSTEM_PROMPT },\n        { role: 'user', content: userPrompt }\n      ]\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        160
+      ],
+      "id": "15b30cc2-a100-411a-b93c-5f17451d5556",
+      "name": "Build Prompt"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.groq_request) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        432,
+        160
+      ],
+      "id": "aa932a3e-0416-48e1-b289-468cfc2821cd",
+      "name": "Groq",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "u6RW7cyaN1ex3Km6",
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ============================================================================\n// n8n Code node: \"Parse Email\"\n// Mode: Run Once for Each Item      Language: JavaScript\n//\n// Input : the Groq API response (from the HTTP Request node)\n// Output: ok (true/false), reason, record_id, email, name, subject, body,\n//         word_count, warnings, unexpected_numbers, raw_response\n//\n// This node is the safety gate. It sets ok = false (and the next IF node skips\n// the donor) when the model's output is unusable or unsafe:\n//   empty_response, json_parse_failed, missing_field, bad_length,\n//   unexpected_numbers (a number the model invented), currency_symbol,\n//   placeholder_leak, bad_email\n// ============================================================================\n\n// Details of this donor, saved by the Build Prompt node\nconst donor = $('Build Prompt').item.json;\n\nconst raw = String($json.choices?.[0]?.message?.content ?? '').trim();\n\nfunction finish(ok, reason, extra) {\n  return {\n    json: Object.assign({\n      ok: ok,\n      reason: reason,\n      record_id: donor.record_id,\n      email: donor.email,\n      name: donor.name,\n      subject: '',\n      body: '',\n      word_count: 0,\n      warnings: [],\n      unexpected_numbers: [],\n      raw_response: raw.slice(0, 1000)\n    }, extra || {})\n  };\n}\n\nif (!raw) return finish(false, 'empty_response');\n\n// Models sometimes wrap JSON in ```json fences or add a sentence before it. Cut down to the {...} part.\nconst cleaned = raw.replace(/```json|```/gi, '').trim();\nconst start = cleaned.indexOf('{');\nconst end = cleaned.lastIndexOf('}');\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned.slice(start, end + 1));\n} catch (e) {\n  return finish(false, 'json_parse_failed');\n}\n\nconst subject = String(parsed.subject ?? '').trim();\nconst body = String(parsed.body ?? '').trim();\nif (!subject || !body) return finish(false, 'missing_field');\n\nconst words = body.split(/\\s+/).filter(Boolean).length;\nconst base = { subject: subject, body: body, word_count: words };\n\n// Target is 90-130 words. Block only the clearly wrong ones, warn on the rest.\nif (words < 40 || words > 220) return finish(false, 'bad_length', base);\n\n// Currency symbols or words: the prompt forbids stating amounts.\nif (/[$\\u20B9\\u20AC\\u00A3]|\\b(?:rs\\.?|inr|usd|rupees?|dollars?)\\b/i.test(subject + ' ' + body)) {\n  return finish(false, 'currency_symbol', base);\n}\n\n// Leftover template placeholders such as {first_name}\nif (/[{}]/.test(subject + body)) return finish(false, 'placeholder_leak', base);\n\n// Any digit string that did not come from the donor data or the update line is treated as invented.\nfunction numbersIn(text) {\n  const found = String(text).match(/\\d[\\d,]*(?:\\.\\d+)?/g) || [];\n  return found.map(x => String(parseFloat(x.replace(/,/g, ''))));\n}\nconst allowed = new Set(donor.allowed_numbers || []);\nconst unexpected = Array.from(new Set(numbersIn(subject + ' ' + body).filter(n => !allowed.has(n))));\nif (unexpected.length > 0) return finish(false, 'unexpected_numbers', Object.assign({}, base, { unexpected_numbers: unexpected }));\n\nif (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(donor.email || '')) return finish(false, 'bad_email', base);\n\n// Soft checks: recorded as warnings, do not block sending.\nconst warnings = [];\nif (words < 90 || words > 130) warnings.push('length_outside_90_130');\nif (!/^dear\\s/i.test(body)) warnings.push('no_dear_greeting');\nif (subject.length >= 55) warnings.push('subject_55_or_longer');\nif (/\\*\\*|^\\s*[-*] /m.test(body)) warnings.push('markdown_in_body');\nif (/!/.test(body)) warnings.push('exclamation_mark');\n\nreturn finish(true, 'ok', Object.assign({}, base, { warnings: warnings }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        160
+      ],
+      "id": "9c71cee8-9376-45f9-9a1f-b53656dde443",
+      "name": "Parse Email"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "7b5fb700-bbf5-410c-8a39-9ece0d327fce",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        864,
+        160
+      ],
+      "id": "c7e58c95-81b0-42d8-8a46-1a6aa8cd09e2",
+      "name": "Email OK?"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "=   {{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1056,
+        144
+      ],
+      "id": "e1c68095-fc95-4efe-b075-99f82bf4db80",
+      "name": "Send Email",
+      "webhookId": "89eb43e7-278a-4cb0-b78b-58289d0df767",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1Q08cakN3H4smfwZ",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "airtableOAuth2Api",
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "apprTSWh4DiaaJFad",
+          "mode": "list",
+          "cachedResultName": "NGO Donor Engagement",
+          "cachedResultUrl": "https://airtable.com/apprTSWh4DiaaJFad"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl8CaSrdSlAZnAHS",
+          "mode": "list",
+          "cachedResultName": "Donors",
+          "cachedResultUrl": "https://airtable.com/apprTSWh4DiaaJFad/tbl8CaSrdSlAZnAHS"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $('Parse Email').item.json.record_id }}",
+            "Last Contacted": "={{ $now.toFormat('yyyy-MM-dd') }}",
+            "Last Email Sent": "={{ $('Parse Email').item.json.subject + '\\n\\n' + $('Parse Email').item.json.body }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": false
+            },
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Impact Area",
+              "displayName": "Impact Area",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Education",
+                  "value": "Education"
+                },
+                {
+                  "name": "Clean Water",
+                  "value": "Clean Water"
+                },
+                {
+                  "name": "Healthcare",
+                  "value": "Healthcare"
+                },
+                {
+                  "name": "Food Security",
+                  "value": "Food Security"
+                },
+                {
+                  "name": "Women's Shelter",
+                  "value": "Women's Shelter"
+                }
+              ],
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Total Given",
+              "displayName": "Total Given",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Last Gift Date",
+              "displayName": "Last Gift Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Last Contacted",
+              "displayName": "Last Contacted",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Donor Since",
+              "displayName": "Donor Since",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Active",
+                  "value": "Active"
+                },
+                {
+                  "name": "Lapsed",
+                  "value": "Lapsed"
+                },
+                {
+                  "name": "Unsubscribed",
+                  "value": "Unsubscribed"
+                }
+              ],
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Last Email Sent",
+              "displayName": "Last Email Sent",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        1248,
+        144
+      ],
+      "id": "6cb704ed-53e6-4b16-9610-839461a90b93",
+      "name": "Log Send",
+      "credentials": {
+        "airtableOAuth2Api": {
+          "id": "jspurTi5HzGCg2Um",
+          "name": "Airtable account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Get Active Donors": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Donors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Donors": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Groq",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Active Donors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq": {
+      "main": [
+        [
+          {
+            "node": "Parse Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Email": {
+      "main": [
+        [
+          {
+            "node": "Email OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email OK?": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Over Donors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [
+          {
+            "node": "Log Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Send": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Donors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "e39fa7b4-abbd-41d8-8409-5fc2b03b16d0",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c6898c7d8fe9f412794d28ce5daa8ff1ce5596361fae39603c565dad12ed46c1"
+  },
+  "nodeGroups": [],
+  "id": "DBixW1mOWtW7Es4i",
+  "tags": []
+}
